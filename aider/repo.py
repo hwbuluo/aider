@@ -16,9 +16,21 @@ class GitRepo:
     aider_ignore_spec = None
     aider_ignore_ts = 0
 
-    def __init__(self, io, fnames, git_dname, aider_ignore_file=None, models=None):
+    def __init__(
+        self,
+        io,
+        fnames,
+        git_dname,
+        aider_ignore_file=None,
+        models=None,
+        attribute_author=True,
+        attribute_committer=True,
+    ):
         self.io = io
         self.models = models
+
+        self.attribute_author = attribute_author
+        self.attribute_committer = attribute_committer
 
         if git_dname:
             check_fnames = [git_dname]
@@ -59,7 +71,7 @@ class GitRepo:
         if aider_ignore_file:
             self.aider_ignore_file = Path(aider_ignore_file)
 
-    def commit(self, fnames=None, context=None, prefix=None, message=None):
+    def commit(self, fnames=None, context=None, message=None, aider_edits=False):
         if not fnames and not self.repo.is_dirty():
             return
 
@@ -75,9 +87,6 @@ class GitRepo:
         if not commit_message:
             commit_message = "(no commit message provided)"
 
-        if prefix:
-            commit_message = prefix + commit_message
-
         full_commit_message = commit_message
         if context:
             full_commit_message += "\n\n# Aider chat conversation:\n\n" + context
@@ -91,9 +100,34 @@ class GitRepo:
         else:
             cmd += ["-a"]
 
+        original_user_name = self.repo.config_reader().get_value("user", "name")
+        original_committer_name_env = os.environ.get("GIT_COMMITTER_NAME")
+        committer_name = f"{original_user_name} (aider)"
+
+        if self.attribute_committer:
+            os.environ["GIT_COMMITTER_NAME"] = committer_name
+
+        if aider_edits and self.attribute_author:
+            original_auther_name_env = os.environ.get("GIT_AUTHOR_NAME")
+            os.environ["GIT_AUTHOR_NAME"] = committer_name
+
         self.repo.git.commit(cmd)
         commit_hash = self.repo.head.commit.hexsha[:7]
         self.io.tool_output(f"Commit {commit_hash} {commit_message}")
+
+        # Restore the env
+
+        if self.attribute_committer:
+            if original_committer_name_env is not None:
+                os.environ["GIT_COMMITTER_NAME"] = original_committer_name_env
+            else:
+                del os.environ["GIT_COMMITTER_NAME"]
+
+        if aider_edits and self.attribute_author:
+            if original_auther_name_env is not None:
+                os.environ["GIT_AUTHOR_NAME"] = original_auther_name_env
+            else:
+                del os.environ["GIT_AUTHOR_NAME"]
 
         return commit_hash, commit_message
 

@@ -121,7 +121,6 @@ class Commands:
     def run(self, inp):
         if inp.startswith("!"):
             return self.do_run("run", inp[1:])
-            return
 
         res = self.matching_commands(inp)
         if res is None:
@@ -333,7 +332,7 @@ class Commands:
 
         last_commit = self.coder.repo.repo.head.commit
         if (
-            not last_commit.message.startswith("aider:")
+            not last_commit.author.name.endswith(" (aider)")
             or last_commit.hexsha[:7] != self.coder.last_aider_commit_hash
         ):
             self.io.tool_error("The last commit was not made by aider in this chat session.")
@@ -639,6 +638,22 @@ class Commands:
             else:
                 self.io.tool_output(f"{cmd} No description available.")
 
+    def get_help_md(self):
+        "Show help about all commands in markdown"
+
+        res = ""
+        commands = sorted(self.get_commands())
+        for cmd in commands:
+            cmd_method_name = f"cmd_{cmd[1:]}"
+            cmd_method = getattr(self, cmd_method_name, None)
+            if cmd_method:
+                description = cmd_method.__doc__
+                res += f"- **{cmd}** {description}\n"
+            else:
+                res += f"- **{cmd}**\n"
+
+        return res
+
     def cmd_voice(self, args):
         "Record and transcribe voice input"
 
@@ -702,3 +717,22 @@ def parse_quoted_filenames(args):
     filenames = re.findall(r"\"(.+?)\"|(\S+)", args)
     filenames = [name for sublist in filenames for name in sublist if name]
     return filenames
+
+
+def get_help_md():
+    from aider.coders import Coder
+    from aider.models import Model
+
+    coder = Coder(Model("gpt-3.5-turbo"), None)
+    md = coder.commands.get_help_md()
+    return md
+
+
+def main():
+    md = get_help_md()
+    print(md)
+
+
+if __name__ == "__main__":
+    status = main()
+    sys.exit(status)

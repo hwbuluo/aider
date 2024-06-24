@@ -17,7 +17,7 @@ from jsonschema import Draft7Validator
 from rich.console import Console, Text
 from rich.markdown import Markdown
 
-from aider import __version__, models, prompts, utils
+from aider import __version__, models, prompts, urls, utils
 from aider.commands import Commands
 from aider.history import ChatSummary
 from aider.io import InputOutput
@@ -27,7 +27,7 @@ from aider.mdstream import MarkdownStream
 from aider.repo import GitRepo
 from aider.repomap import RepoMap
 from aider.sendchat import send_with_retries
-from aider.utils import is_image_file
+from aider.utils import format_content, format_messages, is_image_file
 
 from ..dump import dump  # noqa: F401
 
@@ -218,6 +218,8 @@ class Coder:
         auto_test=False,
         lint_cmds=None,
         test_cmd=None,
+        attribute_author=True,
+        attribute_committer=True,
     ):
         if not fnames:
             fnames = []
@@ -275,6 +277,8 @@ class Coder:
                     git_dname,
                     aider_ignore_file,
                     models=main_model.commit_message_models(),
+                    attribute_author=attribute_author,
+                    attribute_committer=attribute_committer,
                 )
                 self.root = self.repo.root
             except FileNotFoundError:
@@ -586,14 +590,16 @@ class Coder:
                 while new_user_message:
                     self.reflected_message = None
                     list(self.send_new_user_message(new_user_message))
-                    if self.num_reflections < self.max_reflections:
-                        self.num_reflections += 1
-                        new_user_message = self.reflected_message
-                    else:
-                        self.io.tool_error(
-                            f"Only {self.max_reflections} reflections allowed, stopping."
-                        )
-                        new_user_message = None
+
+                    new_user_message = None
+                    if self.reflected_message:
+                        if self.num_reflections < self.max_reflections:
+                            self.num_reflections += 1
+                            new_user_message = self.reflected_message
+                        else:
+                            self.io.tool_error(
+                                f"Only {self.max_reflections} reflections allowed, stopping."
+                            )
 
                 if with_message:
                     return self.partial_response_content
@@ -781,6 +787,8 @@ class Coder:
 
         messages = self.format_messages()
 
+        self.io.log_llm_history("TO LLM", format_messages(messages))
+
         if self.verbose:
             utils.show_messages(messages, functions=self.functions)
 
@@ -793,21 +801,23 @@ class Coder:
         except ExhaustedContextWindow:
             exhausted = True
         except litellm.exceptions.BadRequestError as err:
-            self.io.tool_error(f"BadRequestError: {err}")
-            return
+            if "ContextWindowExceededError" in err.message:
+                exhausted = True
+            else:
+                self.io.tool_error(f"BadRequestError: {err}")
+                return
         except openai.BadRequestError as err:
             if "maximum context length" in str(err):
                 exhausted = True
             else:
                 raise err
+        except Exception as err:
+            self.io.tool_error(f"Unexpected error: {err}")
+            return
 
         if exhausted:
+            self.show_exhausted_error()
             self.num_exhausted_context_windows += 1
-            self.io.tool_error("The chat session is larger than the context window!\n")
-            self.commands.cmd_tokens("")
-            self.io.tool_error("\nTo reduce token usage:")
-            self.io.tool_error(" - Use /drop to remove unneeded files from the chat session.")
-            self.io.tool_error(" - Use /clear to clear chat history.")
             return
 
         if self.partial_response_function_call:
@@ -822,6 +832,8 @@ class Coder:
             content = ""
 
         self.io.tool_output()
+
+        self.io.log_llm_history("LLM RESPONSE", format_content("ASSISTANT", content))
 
         if interrupted:
             content += "\n^C KeyboardInterrupt"
@@ -875,6 +887,63 @@ class Coder:
                 self.reflected_message += "\n\n" + add_rel_files_message
             else:
                 self.reflected_message = add_rel_files_message
+
+    def show_exhausted_error(self):
+        output_tokens = 0
+        if self.partial_response_content:
+            output_tokens = self.main_model.token_count(self.partial_response_content)
+        max_output_tokens = self.main_model.info.get("max_output_tokens", 0)
+
+        input_tokens = self.main_model.token_count(self.format_messages())
+        max_input_tokens = self.main_model.info.get("max_input_tokens", 0)
+
+        total_tokens = input_tokens + output_tokens
+
+        fudge = 0.7
+
+        out_err = ""
+        if output_tokens >= max_output_tokens * fudge:
+            out_err = " -- possibly exceeded output limit!"
+
+        inp_err = ""
+        if input_tokens >= max_input_tokens * fudge:
+            inp_err = " -- possibly exhausted context window!"
+
+        tot_err = ""
+        if total_tokens >= max_input_tokens * fudge:
+            tot_err = " -- possibly exhausted context window!"
+
+        res = ["", ""]
+        res.append(f"Model {self.main_model.name} has hit a token limit!")
+        res.append("Token counts below are approximate.")
+        res.append("")
+        res.append(f"Input tokens: ~{input_tokens:,} of {max_input_tokens:,}{inp_err}")
+        res.append(f"Output tokens: ~{output_tokens:,} of {max_output_tokens:,}{out_err}")
+        res.append(f"Total tokens: ~{total_tokens:,} of {max_input_tokens:,}{tot_err}")
+
+        if output_tokens >= max_output_tokens:
+            res.append("")
+            res.append("To reduce output tokens:")
+            res.append("- Ask for smaller changes in each request.")
+            res.append("- Break your code into smaller source files.")
+            if "diff" not in self.main_model.edit_format:
+                res.append(
+                    "- Use a stronger model like gpt-4o, sonnet or opus that can return diffs."
+                )
+
+        if input_tokens >= max_input_tokens or total_tokens >= max_input_tokens:
+            res.append("")
+            res.append("To reduce input tokens:")
+            res.append("- Use /tokens to see token usage.")
+            res.append("- Use /drop to remove unneeded files from the chat session.")
+            res.append("- Use /clear to clear the chat history.")
+            res.append("- Break your code into smaller source files.")
+
+        res.append("")
+        res.append(f"For more info: {urls.token_limits}")
+
+        res = "".join([line + "\n" for line in res])
+        self.io.tool_error(res)
 
     def lint_edited(self, fnames):
         res = ""
@@ -972,14 +1041,14 @@ class Coder:
         except KeyboardInterrupt:
             self.keyboard_interrupt()
             interrupted = True
-
-        if self.partial_response_content:
-            self.io.ai_output(self.partial_response_content)
-        elif self.partial_response_function_call:
-            # TODO: push this into subclasses
-            args = self.parse_partial_args()
-            if args:
-                self.io.ai_output(json.dumps(args, indent=4))
+        finally:
+            if self.partial_response_content:
+                self.io.ai_output(self.partial_response_content)
+            elif self.partial_response_function_call:
+                # TODO: push this into subclasses
+                args = self.parse_partial_args()
+                if args:
+                    self.io.ai_output(json.dumps(args, indent=4))
 
         if interrupted:
             raise KeyboardInterrupt
@@ -1213,9 +1282,7 @@ class Coder:
             return
 
         self.io.tool_error("Warning: it's best to only add files that need changes to the chat.")
-        self.io.tool_error(
-            "https://aider.chat/docs/faq.html#how-can-i-add-all-the-files-to-the-chat"
-        )
+        self.io.tool_error(urls.edit_errors)
         self.warning_given = True
 
     def prepare_to_edit(self, edits):
@@ -1255,9 +1322,7 @@ class Coder:
             err = err.args[0]
 
             self.io.tool_error("The LLM did not conform to the edit format.")
-            self.io.tool_error(
-                "For more info see: https://aider.chat/docs/faq.html#aider-isnt-editing-my-files"
-            )
+            self.io.tool_error(urls.edit_errors)
             self.io.tool_error()
             self.io.tool_error(str(err), strip=False)
 
@@ -1322,8 +1387,8 @@ class Coder:
         return context
 
     def auto_commit(self, edited):
-        context = self.get_context_from_history(self.cur_messages)
-        res = self.repo.commit(fnames=edited, context=context, prefix="aider: ")
+        # context = self.get_context_from_history(self.cur_messages)
+        res = self.repo.commit(fnames=edited, aider_edits=True)
         if res:
             commit_hash, commit_message = res
             self.last_aider_commit_hash = commit_hash
