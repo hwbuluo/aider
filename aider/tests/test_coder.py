@@ -239,6 +239,29 @@ class TestCoder(unittest.TestCase):
         coder.run(with_message="hi")
         self.assertEqual(len(coder.abs_fnames), 1)
 
+    def test_run_python_code(self):
+
+        file1 = "/Users/liuyong/develop/opencsg/work/project/crmaestro/codegpt/apps/codegen/codegen.py"
+        files = [file1,]
+
+        # Initialize the Coder object with the mocked IO and mocked repo
+        coder = Coder.create(self.GPT35, None, io=InputOutput(), fnames=files)
+
+        #def mock_send(*args, **kwargs):
+        #    coder.partial_response_content = "ok"
+        #    coder.partial_response_function_call = dict()
+        #    return []
+
+        #coder.send = mock_send
+
+        # Call the run method with a message
+        coder.stream = False
+        coder.run(with_message="帮我给这个模块中的代码写一个单元测试，使用pytest框架")
+
+        self.assertEqual(len(coder.abs_fnames), 2)
+
+        file1.unlink()
+
     def test_run_with_file_unicode_error(self):
         # Create a few temporary files
         _, file1 = tempfile.mkstemp()

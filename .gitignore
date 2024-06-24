@@ -8,4 +8,5 @@ build
 Gemfile.lock
 _site
 .jekyll-cache/
+venv/
 .jekyll-metadata
